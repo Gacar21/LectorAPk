@@ -1,10 +1,11 @@
 import * as pdfjsLib from './lib/pdf.min.mjs';
 import { PptxRenderer } from './pptx.js';
+import { native, $, toast, askText, isDialogOpen, closeDialog, printNode, baseName } from './ui.js';
+import { startSigning, endSigning, signBack } from './sign.js';
+import { openEditor, editorBack, isEditing } from './editor.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('lib/pdf.worker.min.mjs', location.href).href;
 
-const native = window.Android || null;
-const $ = (id) => document.getElementById(id);
 
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
@@ -22,40 +23,6 @@ let zoom = 1;
 let openToken = 0;
 
 /* =================== utilidades de interfaz =================== */
-
-let toastTimer;
-const toast = (msg) => {
-  const t = $('toast');
-  t.textContent = msg;
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 2600);
-};
-
-let dialogResolve = null;
-const askText = (title, placeholder = '', type = 'text') =>
-  new Promise((resolve) => {
-    $('dialogTitle').textContent = title;
-    const input = $('dialogInput');
-    input.type = type;
-    input.inputMode = type === 'number' ? 'numeric' : 'text';
-    input.placeholder = placeholder;
-    input.value = '';
-    $('dialog').hidden = false;
-    dialogResolve = resolve;
-    setTimeout(() => input.focus(), 50);
-  });
-const closeDialog = (value) => {
-  $('dialog').hidden = true;
-  const r = dialogResolve;
-  dialogResolve = null;
-  r && r(value);
-};
-$('dialogForm').addEventListener('submit', (e) => {
-  e.preventDefault();
-  closeDialog($('dialogInput').value);
-});
-$('dialogCancel').addEventListener('click', () => closeDialog(null));
 
 const setLoading = (text) => {
   $('loading').hidden = text === null;
@@ -205,6 +172,7 @@ const sniffKind = async (buffer) => {
 };
 
 async function openDocument(info, loadBuffer) {
+  if (isEditing()) return; // el editor maneja sus propios archivos
   const token = ++openToken;
   closeCurrent();
   zoom = 1;
@@ -229,6 +197,7 @@ async function openDocument(info, loadBuffer) {
     current.kind = kind;
     current.name = info.name;
     current.uri = info.uri;
+    showKindActions(kind);
     updatePageInfo();
     addRecent({ uri: info.uri, name: info.name, kind, size: info.size || buffer.byteLength });
   } catch (err) {
@@ -239,6 +208,8 @@ async function openDocument(info, loadBuffer) {
 }
 
 function closeCurrent() {
+  endSigning();
+  showKindActions(null);
   if (current && current.dispose) current.dispose();
   current = null;
   content.replaceChildren();
@@ -253,6 +224,12 @@ function showViewer(name, kind) {
   $('docTitle').textContent = name || 'Documento';
   setKind(kind);
   $('pageInfo').textContent = '–';
+}
+
+function showKindActions(kind) {
+  $('btnSign').hidden = kind !== 'pdf';
+  $('btnEdit').hidden = kind !== 'docx';
+  $('btnToPdf').hidden = kind !== 'docx';
 }
 
 function setKind(kind) {
@@ -271,10 +248,12 @@ function showHome() {
 }
 
 window.handleBack = () => {
-  if (!$('dialog').hidden) {
+  if (isDialogOpen()) {
     closeDialog(null);
     return true;
   }
+  if (editorBack()) return true;
+  if (signBack()) return true;
   if (!$('viewer').hidden) {
     showHome();
     return true;
@@ -289,6 +268,8 @@ const baseWidth = () => Math.max(scroller.clientWidth - 16, 200);
 /* =================== PDF =================== */
 
 async function openPdf(buffer, token) {
+  // pdf.js se queda con el buffer; guardamos una copia para poder firmar
+  const originalBytes = new Uint8Array(buffer.slice(0));
   const task = pdfjsLib.getDocument({
     data: new Uint8Array(buffer),
     standardFontDataUrl: new URL('lib/standard_fonts/', location.href).href,
@@ -410,6 +391,7 @@ async function openPdf(buffer, token) {
 
   return {
     pages: pages.map((p) => p.el),
+    originalBytes,
     layout,
     dispose() {
       observer.disconnect();
@@ -422,6 +404,7 @@ async function openPdf(buffer, token) {
 /* =================== Word =================== */
 
 async function openDocx(buffer, token) {
+  const originalBuffer = buffer.slice(0);
   const host = document.createElement('div');
   host.className = 'docx-host';
   const styleHost = document.createElement('div');
@@ -463,7 +446,7 @@ async function openDocx(buffer, token) {
     }
   });
 
-  return { pages: sections, layout, dispose() {} };
+  return { pages: sections, layout, wrapper, originalBuffer, dispose() {} };
 }
 
 // Word guarda las viñetas como caracteres de las fuentes Symbol/Wingdings,
@@ -473,6 +456,7 @@ const SYMBOL_BULLETS = {
   '': '➢', '': '✓', '': '❖', '': '➔', '': '➔',
   '': '❑', '': '▫', '': '–',
 };
+window.fixSymbolBullets = fixSymbolBullets;
 function fixSymbolBullets(styleHost) {
   for (const style of styleHost.querySelectorAll('style')) {
     let css = style.textContent;
@@ -672,6 +656,48 @@ let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => current && current.layout(), 150);
+});
+
+/* =================== firmar, editar, convertir =================== */
+
+$('btnSign').addEventListener('click', () => {
+  if (current?.kind === 'pdf') startSigning(current);
+});
+
+const backToViewerOrHome = () => {
+  if (current) {
+    $('viewer').hidden = false;
+  } else {
+    $('home').hidden = false;
+    renderRecent();
+  }
+};
+
+const rememberSaved = ({ name, uri, size }) => addRecent({ uri, name, kind: 'docx', size });
+
+$('btnEdit').addEventListener('click', () => {
+  if (current?.kind !== 'docx') return;
+  openEditor({
+    buffer: current.originalBuffer.slice(0),
+    name: current.name,
+    onClose: backToViewerOrHome,
+    onSaved: rememberSaved,
+  });
+});
+
+$('btnNewDoc').addEventListener('click', () => {
+  openEditor({ name: 'Documento nuevo.docx', onClose: backToViewerOrHome, onSaved: rememberSaved });
+});
+
+$('btnToPdf').addEventListener('click', () => {
+  if (current?.kind !== 'docx' || !current.wrapper) return;
+  const clone = current.wrapper.cloneNode(true);
+  clone.style.zoom = '1';
+  const first = current.wrapper.querySelector(':scope > section');
+  const w = first?.style.width || '8.5in';
+  const h = first?.style.minHeight || first?.style.height || '11in';
+  printNode(clone, { jobName: baseName(current.name), page: `size: ${w} ${h}; margin: 0` });
+  toast('Elige “Guardar como PDF” en la impresora');
 });
 
 applyNight();

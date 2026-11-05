@@ -7,8 +7,13 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.print.PrintAttributes;
+import android.print.PrintManager;
 import android.provider.OpenableColumns;
+import android.util.Base64;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -18,7 +23,9 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +42,8 @@ public class MainActivity extends Activity {
     private static final String HOST = "appassets.androidplatform.net";
     private static final String START_URL = "https://" + HOST + "/www/index.html";
     private static final int PICK_FILE = 41;
+    private static final int SAVE_FILE = 42;
+    private static final int CHOOSE_FOR_PAGE = 43;
 
     private static final String[] MIME_TYPES = {
             "application/pdf",
@@ -60,6 +69,14 @@ public class MainActivity extends Activity {
     private boolean pageReady = false;
     private Uri pendingUri;
 
+    // Guardado: el JS envía los bytes en trozos base64 y luego se elige dónde guardar
+    private ByteArrayOutputStream saveBuffer;
+    private String saveName;
+    private boolean openAfterSave;
+
+    // Selector para <input type="file"> dentro de la página (imágenes, firmas PNG)
+    private ValueCallback<Uri[]> fileCallback;
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,6 +97,26 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(true);
 
         webView.addJavascriptInterface(new Bridge(), "Android");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                fileCallback = callback;
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                String[] types = params.getAcceptTypes();
+                String type = (types != null && types.length > 0 && types[0] != null && !types[0].isEmpty()) ? types[0] : "*/*";
+                if (type.startsWith(".")) type = "*/*";
+                i.setType(type);
+                try {
+                    startActivityForResult(i, CHOOSE_FOR_PAGE);
+                } catch (ActivityNotFoundException e) {
+                    fileCallback = null;
+                    return false;
+                }
+                return true;
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -207,6 +244,18 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == CHOOSE_FOR_PAGE) {
+            if (fileCallback != null) {
+                Uri u = (resultCode == RESULT_OK && data != null) ? data.getData() : null;
+                fileCallback.onReceiveValue(u == null ? null : new Uri[]{u});
+                fileCallback = null;
+            }
+            return;
+        }
+        if (requestCode == SAVE_FILE) {
+            finishSaving(resultCode == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
         if (requestCode != PICK_FILE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         // Permiso persistente para poder reabrirlo desde "Recientes"
@@ -221,6 +270,38 @@ public class MainActivity extends Activity {
         webView.evaluateJavascript("window.handleBack ? window.handleBack() : false", value -> {
             if (!"true".equals(value)) MainActivity.super.onBackPressed();
         });
+    }
+
+    private void finishSaving(Uri uri) {
+        boolean ok = false;
+        if (uri != null && saveBuffer != null) {
+            for (String mode : new String[]{"wt", "w"}) {
+                try (OutputStream out = getContentResolver().openOutputStream(uri, mode)) {
+                    if (out != null) {
+                        saveBuffer.writeTo(out);
+                        ok = true;
+                        break;
+                    }
+                } catch (Exception ignored) { }
+            }
+            if (ok) {
+                try {
+                    getContentResolver().takePersistableUriPermission(uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                } catch (Exception ignored) { }
+            }
+        }
+        saveBuffer = null;
+        try {
+            JSONObject info = new JSONObject();
+            info.put("ok", ok);
+            info.put("cancelled", uri == null);
+            info.put("name", ok ? displayName(uri) : saveName);
+            info.put("uri", ok ? uri.toString() : "");
+            final String js = "window.onNativeSaved && window.onNativeSaved(" + info + ")";
+            runOnUiThread(() -> webView.evaluateJavascript(js, null));
+        } catch (Exception ignored) { }
+        if (ok && openAfterSave) deliver(uri);
     }
 
     private void toast(String msg) {
@@ -267,6 +348,48 @@ public class MainActivity extends Activity {
             i.putExtra(Intent.EXTRA_STREAM, uri);
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             runOnUiThread(() -> startActivity(Intent.createChooser(i, "Compartir")));
+        }
+
+        /** Guardar un archivo generado en la página: beginSave → appendSave (n veces) → finishSave */
+        @JavascriptInterface
+        public void beginSave(String name) {
+            saveBuffer = new ByteArrayOutputStream();
+            saveName = name;
+        }
+
+        @JavascriptInterface
+        public void appendSave(String base64Chunk) {
+            if (saveBuffer == null) return;
+            byte[] bytes = Base64.decode(base64Chunk, Base64.DEFAULT);
+            saveBuffer.write(bytes, 0, bytes.length);
+        }
+
+        @JavascriptInterface
+        public void finishSave(String mime, boolean openAfter) {
+            openAfterSave = openAfter;
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType(mime);
+            i.putExtra(Intent.EXTRA_TITLE, saveName);
+            runOnUiThread(() -> {
+                try {
+                    startActivityForResult(i, SAVE_FILE);
+                } catch (ActivityNotFoundException e) {
+                    finishSaving(null);
+                }
+            });
+        }
+
+        /** Abre el diálogo de impresión de Android; ahí se elige "Guardar como PDF". */
+        @JavascriptInterface
+        public void printPage(String jobName) {
+            runOnUiThread(() -> {
+                PrintManager pm = (PrintManager) getSystemService(PRINT_SERVICE);
+                if (pm == null) return;
+                String name = jobName == null || jobName.isEmpty() ? "Documento" : jobName;
+                pm.print(name, webView.createPrintDocumentAdapter(name),
+                        new PrintAttributes.Builder().build());
+            });
         }
 
         @JavascriptInterface
