@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.lectordocs.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.lectordocs.app'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // Los .mjs de pdf.js no deben comprimirse ni filtrarse
+    androidResources {
+        noCompress 'mjs', 'js'
+    }
+}
