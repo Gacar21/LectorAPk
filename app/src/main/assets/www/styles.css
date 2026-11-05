@@ -40,6 +40,49 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: poi
 
 .screen { min-height: 100%; }
 
+/* ---------- bienvenida DECOM ---------- */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--paper);
+  transition: opacity .45s ease;
+}
+.splash img {
+  width: 150px;
+  height: 150px;
+  margin-bottom: 14px;
+  animation: splash-in .6s cubic-bezier(.2, .8, .2, 1) both;
+}
+.splash-brand {
+  margin: 0;
+  font-weight: 800;
+  font-size: 26px;
+  letter-spacing: .32em;
+  padding-left: .32em;
+  color: #4B3FA8;
+  animation: splash-in .6s .12s cubic-bezier(.2, .8, .2, 1) both;
+}
+:root[data-theme="dark"] .splash-brand { color: #9C90F0; }
+.splash-sub {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  animation: splash-in .6s .2s cubic-bezier(.2, .8, .2, 1) both;
+}
+.splash.gone { opacity: 0; pointer-events: none; }
+@keyframes splash-in {
+  from { opacity: 0; transform: scale(.92); }
+  to { opacity: 1; transform: none; }
+}
+
 /* ---------- inicio ---------- */
 #home {
   max-width: 560px;
@@ -49,8 +92,15 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: poi
   flex-direction: column;
   gap: 22px;
 }
+.head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.corner-logo { width: 52px; height: 52px; margin: -6px -4px -6px 0; }
 .eyebrow {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 12px;
   letter-spacing: .14em;
   text-transform: uppercase;

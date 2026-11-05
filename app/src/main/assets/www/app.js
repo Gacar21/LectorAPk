@@ -676,3 +676,10 @@ window.addEventListener('resize', () => {
 
 applyNight();
 renderRecent();
+
+// Pantalla de bienvenida con el logo de DECOM
+setTimeout(() => {
+  const splash = $('splash');
+  splash.classList.add('gone');
+  setTimeout(() => splash.remove(), 500);
+}, 1200);
